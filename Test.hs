@@ -1,6 +1,7 @@
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE Arrows #-}
 {-# LANGUAGE LambdaCase #-}
+
 import Control.Monad
 import Graphics.UI.GLUT
 import Data.IORef
@@ -11,6 +12,7 @@ import FRP.Yampa.Integration
 import FRP.Yampa.VectorSpace
 import Data.Time.Clock.POSIX
 import Control.Lens
+import Data.Monoid
 import Text.Printf
 
 circPoints (fromIntegral -> n) = map (\v -> (sin (v*2*pi/n), cos (v*2*pi/n))) [1..n]
@@ -26,7 +28,8 @@ main =
   do (prog,args) <- getArgsAndInitialize
      (initialDisplayMode $=) =<< (DoubleBuffered :) <$> get initialDisplayMode
      win <- createWindow "hello"
-     
+     depthFunc $= Just Less
+
      state <- newIORef (0,0,0)
      oldTime <- newIORef 0
      
@@ -60,7 +63,7 @@ main =
 
 display :: IORef State -> IO () -> DisplayCallback
 display state step = 
-  do clear [ ColorBuffer ]
+  do clear [ ColorBuffer, DepthBuffer ]
      loadIdentity
      
      step
@@ -69,23 +72,24 @@ display state step =
      color $ Color3 1 1 (1::GLfloat)
      translate $ Vector3 (realToFrac x) (realToFrac y) (0::GLfloat)
      rotate ((realToFrac r)*180/pi) $ Vector3 0 0 (1::GLfloat)
-                                              
-     cube 0.2
+     rotate 30 $ Vector3 1 1 (0::GLfloat)
+
+     cubeLined 0.2
      translate $ Vector3 0.15 0 (0::GLfloat)
      color $ Color3 1 0 (0::GLfloat)
-     cube 0.1
-     -- forM_ (circPoints 7) $ \(x,y) -> 
-     --   preservingMatrix $ do 
-     --     color $ Color3 ((x+1)/2) ((y+1)/2) (0::GLfloat)
-     --     translate $ Vector3 x y 0
-     --     cube 0.1
+     cubeLined 0.1
+
      swapBuffers
+  where cubeLined n = 
+          do cube n
+             color $ Color3 0 0 (0::GLfloat)
+             cubeFrame n
 
 keyIsDown :: Key -> SF Input Bool
 keyIsDown k = loopPre False
                       (arr $ \case 
-                               (Key ((==k) -> True) Down,_) -> (True,True)
-                               (Key ((==k) -> True) Up, _) -> (False,False)
+                               (Key k' Down,_) | k == k' -> (True,True)
+                               (Key k' Up, _) | k == k' -> (False,False)
                                (_,last) -> (last,last))
                                
 joystickEvent (Joystick btns pos) = Event (btns,pos)
@@ -137,3 +141,14 @@ cube w = renderPrimitive Quads $
               mapM_ (\(a,b) -> vertex $ Vertex3 a b w) verts
               mapM_ (\(a,b) -> vertex $ Vertex3 a b (-w)) verts
   where verts = [(w,w),(w,-w),(-w,-w),(-w,w)]
+
+cubeFrame :: GLfloat -> IO ()
+cubeFrame w = renderPrimitive LineLoop $ 
+                do mapM_ (\(a,b) -> vertex $ Vertex3 w a b) verts
+                   mapM_ (\(a,b) -> vertex $ Vertex3 (-w) a b) verts
+                   mapM_ (\(a,b) -> vertex $ Vertex3 a w b) verts
+                   mapM_ (\(a,b) -> vertex $ Vertex3 a (-w) b) verts
+                   mapM_ (\(a,b) -> vertex $ Vertex3 a b w) verts
+                   mapM_ (\(a,b) -> vertex $ Vertex3 a b (-w)) verts
+  where verts = [(w,w),(w,-w),(-w,-w),(-w,w)]
+
