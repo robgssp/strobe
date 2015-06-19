@@ -1,19 +1,34 @@
+{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE Arrows #-}
 {-# LANGUAGE LambdaCase #-}
-
+{-# LANGUAGE FlexibleInstances #-}
 import Control.Monad
-import Graphics.UI.GLUT
 import Data.IORef
 import Control.Arrow
-import FRP.Yampa
+import Graphics.UI.GLUT
+       (keyboardMouseCallback, joystickCallback, idleCallback, Key(..),
+        KeyState(..), JoystickButtons(..), JoystickPosition(..),
+        getArgsAndInitialize, SpecialKey(..), PerWindowKeyRepeat(..),
+        perWindowKeyRepeat, postRedisplay, mainLoop, ($=), get,
+        elapsedTime)
+import Data.Vec hiding (map,get)
+--import Data.Vec.Nat
+import Graphics.GPipe
+import Graphics.GPipe.Format
+import FRP.Yampa hiding (normalize)
 import FRP.Yampa.Vector2
 import FRP.Yampa.Integration
-import FRP.Yampa.VectorSpace
+import FRP.Yampa.VectorSpace hiding (normalize)
 import Data.Time.Clock.POSIX
 import Control.Lens
 import Data.Monoid
 import Text.Printf
+import Control.Applicative
+import Data.Array.Storable
+import Foreign.Storable
+import Foreign.Ptr
 
 circPoints (fromIntegral -> n) = map (\v -> (sin (v*2*pi/n), cos (v*2*pi/n))) [1..n]
 
@@ -21,69 +36,73 @@ data Input
   = Key Key KeyState
   | Joystick JoystickButtons JoystickPosition
   deriving (Eq,Show)
+
 type State = (Double,Double,Double)
 
 main :: IO ()
 main =
-  do (prog,args) <- getArgsAndInitialize
-     (initialDisplayMode $=) =<< (DoubleBuffered :) <$> get initialDisplayMode
-     win <- createWindow "hello"
-     depthFunc $= Just Less
+  do getArgsAndInitialize
 
      state <- newIORef (0,0,0)
      oldTime <- newIORef 0
-     
+
      rh <- reactInit (return $ Key (Char 'a') Up)
                      (\_ _ st ->
                         do writeIORef state st
                            return False)
                      ctl
 
-     let doReact st = do t <- get oldTime
-                         t' <- get elapsedTime
-                         oldTime $= t'
-                         let td = fromIntegral (t' - t) / 1000
-                         printf "Feeding %s at %d\n" (show st) (t'-t)
-                         void $ react rh (td, st)
+     let doReact st = 
+           do t <- get oldTime
+              t' <- get elapsedTime
+              oldTime $= t'
+              let td = fromIntegral (t' - t) / 1000
+              printf "Feeding %s at %d\n" (show st) (t' - t)
+              void $ react rh (td, st)
+         initWindow win = return ()
+           -- do keyboardMouseCallback $=
+           --           Just (\key kstate _ _ -> doReact (Just (Key key kstate)))
 
-     displayCallback $= (display state (doReact Nothing))
+           --    joystickCallback $=
+           --           Just (\buttons pos -> doReact (Just (Joystick buttons pos)), 10)
+
+           --    idleCallback $= Just (postRedisplay Nothing)
+
+     newWindow "test" (100:.100:.()) (800:.600:.()) (display state (doReact Nothing)) initWindow
+
      perWindowKeyRepeat $= PerWindowKeyRepeatOff
 
      let keyval dir = if dir == Up then 1 else 0
-     keyboardMouseCallback $=
-       Just (\key kstate _ _ -> doReact (Just (Key key kstate)))
-       
-     joystickCallback $=
-       Just (\buttons pos -> doReact (Just (Joystick buttons pos)), 10)
 
-     idleCallback $=
-       Just (postRedisplay (Just win))
-     
      mainLoop
 
-display :: IORef State -> IO () -> DisplayCallback
-display state step = 
-  do clear [ ColorBuffer, DepthBuffer ]
-     loadIdentity
-     
-     step
-     (x,y,r) <- get state
+display :: IORef State -> IO () -> Vec2 Int -> IO (FrameBuffer RGBFormat () ())
+display state step size = 
+  do step
+     st <- readIORef state
+     return (frameBuffer (redFrag (trans (cube TriangleFan))))
 
-     color $ Color3 1 1 (1::GLfloat)
-     translate $ Vector3 (realToFrac x) (realToFrac y) (0::GLfloat)
-     rotate ((realToFrac r)*180/pi) $ Vector3 0 0 (1::GLfloat)
-     rotate 30 $ Vector3 1 1 (0::GLfloat)
+cube :: Primitive p => p -> PrimitiveStream p (Vec3 (Vertex Float))
+cube p = mconcat (map ((toGPUStream p).(`map` ps)) [\(x,y) -> x:.y:.0:.()
+                                                   ,\(x,y) -> y:.x:.1:.()
+                                                   ])
+  where ps = [(0,0),(1,0),(1,1),(0,1)]
 
-     cubeLined 0.2
-     translate $ Vector3 0.15 0 (0::GLfloat)
-     color $ Color3 1 0 (0::GLfloat)
-     cubeLined 0.1
+tri :: PrimitiveStream Triangle (Vec3 (Vertex Float))
+tri = toGPUStream TriangleStrip [1:.0:.0:.(), 0:.1:.0:.(), 0:.0:.0:.()]
 
-     swapBuffers
-  where cubeLined n = 
-          do cube n
-             color $ Color3 0 0 (0::GLfloat)
-             cubeFrame n
+trans :: Primitive p => PrimitiveStream p (Vec3 (Vertex Float)) -> PrimitiveStream p (Vec4 (Vertex Float))
+trans = fmap trans'
+  where trans' pos = translation ((-0.5):.(-0.5):.0:.()) `multmv` homPoint pos
+
+redFrag :: PrimitiveStream p (Vec4 (Vertex Float)) -> FragmentStream (Color RGBFormat (Fragment Float))
+redFrag vs = const (RGB (1:.0:.0:.())) <$> rasterizeFront ((,()) <$> vs)
+
+frameBuffer :: FragmentStream (Color RGBFormat (Fragment Float)) -> FrameBuffer RGBFormat () ()
+frameBuffer fs = paintSolid fs emptyFrameBuffer
+
+paintSolid = paintColor NoBlending (RGB (vec True))
+emptyFrameBuffer = newFrameBufferColor (RGB 0)
 
 keyIsDown :: Key -> SF Input Bool
 keyIsDown k = loopPre False
@@ -91,16 +110,16 @@ keyIsDown k = loopPre False
                                (Key k' Down,_) | k == k' -> (True,True)
                                (Key k' Up, _) | k == k' -> (False,False)
                                (_,last) -> (last,last))
-                               
+
 joystickEvent (Joystick btns pos) = Event (btns,pos)
 joystickEvent _ = NoEvent
 
-clamp l h v | v > h = h
-            | v < l = l
-            | otherwise = v
+clampN l h v | v > h = h
+             | v < l = l
+             | otherwise = v
 
-clampVec lx hx ly hy v = vector2 (clamp lx hx (vector2X v))
-                                 (clamp ly hy (vector2Y v))
+clampVec lx hx ly hy v = vector2 (clampN lx hx (vector2X v))
+                                 (clampN ly hy (vector2Y v))
 
 ctl :: SF Input State
 ctl = 
@@ -131,24 +150,3 @@ ctl =
   where boolN True = 1
         boolN False = 0
         keyNum k = boolN ^<< keyIsDown k
-
-cube :: GLfloat -> IO ()
-cube w = renderPrimitive Quads $ 
-           do mapM_ (\(a,b) -> vertex $ Vertex3 w a b) verts
-              mapM_ (\(a,b) -> vertex $ Vertex3 (-w) a b) verts
-              mapM_ (\(a,b) -> vertex $ Vertex3 a w b) verts
-              mapM_ (\(a,b) -> vertex $ Vertex3 a (-w) b) verts
-              mapM_ (\(a,b) -> vertex $ Vertex3 a b w) verts
-              mapM_ (\(a,b) -> vertex $ Vertex3 a b (-w)) verts
-  where verts = [(w,w),(w,-w),(-w,-w),(-w,w)]
-
-cubeFrame :: GLfloat -> IO ()
-cubeFrame w = renderPrimitive LineLoop $ 
-                do mapM_ (\(a,b) -> vertex $ Vertex3 w a b) verts
-                   mapM_ (\(a,b) -> vertex $ Vertex3 (-w) a b) verts
-                   mapM_ (\(a,b) -> vertex $ Vertex3 a w b) verts
-                   mapM_ (\(a,b) -> vertex $ Vertex3 a (-w) b) verts
-                   mapM_ (\(a,b) -> vertex $ Vertex3 a b w) verts
-                   mapM_ (\(a,b) -> vertex $ Vertex3 a b (-w)) verts
-  where verts = [(w,w),(w,-w),(-w,-w),(-w,w)]
-
